@@ -29,18 +29,18 @@ func (root *groupRoot) Elect() ([]*clusterv1alpha1.Cluster, error) {
 	election, err := root.selectCluster(root.Replicas)
 	if err != nil {
 		return nil, err
-	} else {
-		return toCluster(sortClusters(election.Clusters)), nil
+	} else if root.Replicas > 0 && election.Replicas < root.Replicas {
+		return nil, fmt.Errorf("no enough resource when selecting %d clusters", len(election.Clusters))
 	}
+	return toCluster(sortClusters(election.Clusters)), nil
 }
 
 // selectCluster method to select clusters based on the required replicas
 func (node *groupNode) selectCluster(replicas int32) (*candidate, error) {
 	if node.Leaf {
 		return node.selectByClusters(replicas)
-	} else {
-		return node.selectByGroups(replicas)
 	}
+	return node.selectByGroups(replicas)
 }
 
 // selectByClusters selects clusters from the current group's Clusters list
@@ -49,7 +49,7 @@ func (node *groupNode) selectByClusters(replicas int32) (*candidate, error) {
 		Name: node.Name,
 	}
 	for _, cluster := range node.Clusters {
-		if replicas == InvalidReplicas || cluster.AvailableReplicas > 0 {
+		if replicas <= 0 || cluster.AvailableReplicas > 0 {
 			result.Clusters = append(result.Clusters, cluster)
 		}
 	}
@@ -62,23 +62,28 @@ func (node *groupNode) selectByClusters(replicas int32) (*candidate, error) {
 func (node *groupNode) selectByGroups(replicas int32) (*candidate, error) {
 	if !node.Valid {
 		return nil, errors.New("the number of feasible clusters is less than spreadConstraint.MinGroups")
-	} else {
-		// the groups of valid nod are ordered by score desc.
-		var candidates []*candidate
-		// use DFS to find the best path
-		paths := node.findPaths(replicas)
-		if len(paths) == 0 {
-			return nil, fmt.Errorf("no enough resource when selecting %d %ss", node.MaxGroups, node.Constraint)
-		}
-		path := node.selectBest(paths)
-
-		for _, node := range path.Nodes {
-			participant, _ := node.Group.selectCluster(ternary(replicas == InvalidReplicas, InvalidReplicas, node.Replicas))
-			candidates = append(candidates, participant)
-		}
-
-		return node.merge(candidates), nil
 	}
+	// use DFS to find the best path
+	paths := node.findPaths(replicas)
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("no enough resource when selecting %d %ss", node.MaxGroups, node.Constraint)
+	}
+
+	var results []*candidate
+	for _, path := range paths {
+		// TODO optimize
+		var candidates []*candidate
+		for _, node := range path.Nodes {
+			candidate, _ := node.Group.selectCluster(ternary(replicas <= 0, replicas, replicas-path.Replicas+node.Replicas))
+			candidates = append(candidates, candidate)
+		}
+		candidate := node.merge(candidates)
+		candidate.Id = path.Id
+		candidate.Name = node.Name
+		results = append(results, candidate)
+	}
+
+	return node.selectBest(results), nil
 }
 
 // findPaths finds all possible paths of groups that meet the required replicas using DFS.
@@ -88,8 +93,8 @@ func (node *groupNode) findPaths(replicas int32) (paths []*dfsPath) {
 	var dfsFunc func(int, *dfsPath)
 	dfsFunc = func(start int, current *dfsPath) {
 		length := current.length()
-		if replicas == InvalidReplicas && length == node.MaxGroups ||
-			(replicas != InvalidReplicas && current.Replicas >= replicas && length > 0 &&
+		if replicas <= 0 && length == node.MaxGroups ||
+			(replicas > 0 && current.Replicas >= replicas && length > 0 &&
 				(node.MinGroups <= 0 || length >= node.MinGroups)) {
 			paths = append(paths, current.next())
 		} else if length < node.MaxGroups {
@@ -106,22 +111,22 @@ func (node *groupNode) findPaths(replicas int32) (paths []*dfsPath) {
 	return paths
 }
 
-// selectBest selects the best path from the given paths based on the maximum score and replicas.
-func (node *groupNode) selectBest(paths []*dfsPath) *dfsPath {
-	size := len(paths)
+// selectBest selects the best candidates from the given candidates based on the maximum score and replicas.
+func (node *groupNode) selectBest(candidates []*candidate) *candidate {
+	size := len(candidates)
 	if size == 0 {
 		return nil
 	} else if size > 1 {
-		sort.Slice(paths, func(i, j int) bool {
-			if paths[i].MaxScore != paths[j].MaxScore {
-				return paths[i].MaxScore > paths[j].MaxScore
-			} else if paths[i].Replicas != paths[j].Replicas {
-				return paths[i].Replicas > paths[j].Replicas
+		sort.Slice(candidates, func(i, j int) bool {
+			if candidates[i].MaxScore != candidates[j].MaxScore {
+				return candidates[i].MaxScore > candidates[j].MaxScore
+			} else if candidates[i].Replicas != candidates[j].Replicas {
+				return candidates[i].Replicas > candidates[j].Replicas
 			}
-			return paths[i].Id < paths[j].Id
+			return candidates[i].Id < candidates[j].Id
 		})
 	}
-	return paths[0]
+	return candidates[0]
 }
 
 // merge combines a list of candidate objects into a single candidate.

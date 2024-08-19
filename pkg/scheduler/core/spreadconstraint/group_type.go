@@ -58,6 +58,7 @@ type groupBuilder struct {
 // candidate represents a group with its name, highest cluster score, number of available replicas,
 // and a list of clusters sorted by their maximum score in descending order.
 type candidate struct {
+	Id       int            // Unique identifier for the candidate.
 	Name     string         // The name of the group.
 	MaxScore int64          // The highest cluster score in this group.
 	Replicas int32          // Number of available replicas in this group.
